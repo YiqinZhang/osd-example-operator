@@ -2,6 +2,15 @@
 
 Production-ready Argo Workflows pipeline for deploying the OSD Example Operator across multiple environments with comprehensive testing, approval gates, and notifications.
 
+## 🏗️ Architecture Overview
+
+This deployment pipeline implements GitOps best practices with:
+- **Security-first approach**: RBAC, non-root containers, security contexts
+- **Multi-environment promotion**: INT → STAGE → PROD with approval gates
+- **Comprehensive testing**: E2E tests, health checks, operator validation
+- **Observability**: Detailed logging, notifications, and monitoring
+- **Compliance**: OpenShift security standards and SRE best practices
+
 ## 🚀 Quick Start
 
 ### Prerequisites
@@ -37,17 +46,26 @@ kubectl apply -f deployment-workflow.yaml
 
 # Run basic deployment (INT → STAGE)
 argo submit --from workflowtemplate/osd-example-operator-deployment \
+  -p image-registry="quay.io/app-sre" \
+  -p image-name="osd-example-operator" \
+  -p image-tag="latest" \
   --generate-name="deploy-" -n argo-workflows
 
 # Run with approval gates
 argo submit --from workflowtemplate/osd-example-operator-deployment \
-  -p enable-approval=true \
+  -p image-registry="quay.io/app-sre" \
+  -p image-name="osd-example-operator" \
+  -p image-tag="v1.2.3" \
+  -p enable-approval="true" \
   -p approver-email="your-team@company.com" \
   --generate-name="deploy-approval-" -n argo-workflows
 
 # Run with notifications
 argo submit --from workflowtemplate/osd-example-operator-deployment \
-  -p enable-notifications=true \
+  -p image-registry="quay.io/app-sre" \
+  -p image-name="osd-example-operator" \
+  -p image-tag="latest" \
+  -p enable-notifications="true" \
   -p slack-webhook="https://hooks.slack.com/services/YOUR/SLACK/WEBHOOK" \
   -p notification-webhook="https://your-system.com/webhook" \
   --generate-name="deploy-notify-" -n argo-workflows
@@ -217,6 +235,50 @@ deploy_to_staging:
 }
 ```
 
+## 🔄 CI/CD Integration & Automation
+
+### Automated Date Updates
+To automatically update the "Last Updated" field in this README during CI/CD:
+
+```yaml
+# .github/workflows/update-readme.yml or similar CI job
+- name: Update README timestamp
+  run: |
+    sed -i "s/\*\*Last Updated\*\*:.*/\*\*Last Updated\*\*: $(date -u +%Y-%m-%d)/g" deploy/argo-workflows/README.md
+    git add deploy/argo-workflows/README.md
+    git commit -m "docs: update README timestamp" || true
+```
+
+### GitOps Integration
+```yaml
+# Example CI pipeline integration
+steps:
+  - name: Trigger Argo Workflow
+    run: |
+      argo submit --from workflowtemplate/osd-example-operator-deployment \\
+        -p image-registry="quay.io/app-sre" \\
+        -p image-name="osd-example-operator" \\
+        -p image-tag="${{ github.sha }}" \\
+
+        -p enable-notifications="true" \\
+        -p slack-webhook="${{ secrets.SLACK_WEBHOOK }}" \\
+        --generate-name="ci-deploy-" \\
+        -n argo-workflows
+```
+
+### Image Promotion Strategy
+```bash
+# Recommended tagging strategy
+# Development builds
+quay.io/app-sre/osd-example-operator:pr-123
+quay.io/app-sre/osd-example-operator:commit-abc123
+
+# Release builds
+quay.io/app-sre/osd-example-operator:v1.2.3
+quay.io/app-sre/osd-example-operator:latest
+quay.io/app-sre/osd-example-operator:stable
+```
+
 ## 📞 Support
 
 - **Repository**: [osd-example-operator](https://github.com/your-org/osd-example-operator)
@@ -226,4 +288,4 @@ deploy_to_staging:
 ---
 **Version**: 1.0.0
 **Team**: Site Reliability Engineering
-**Last Updated**: $(date -u +%Y-%m-%d)
+**Last Updated**: 2025-08-06

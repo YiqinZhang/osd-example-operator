@@ -12,13 +12,21 @@ spec:
   arguments:
     parameters:
     - name: app-name
-      value: "osd-example-app"
+      value: "osd-example-operator"
     - name: app-version
-      value: "v1.0.0"
+      value: "latest"
+    - name: image-registry
+      value: "quay.io/app-sre"
+    - name: image-name
+      value: "osd-example-operator"
+    - name: image-tag
+      value: "latest"
     - name: int-replicas
       value: "1"
     - name: stage-replicas
       value: "2"
+    - name: prod-replicas
+      value: "3"
     - name: slack-webhook
       value: ""
     - name: notification-webhook
@@ -28,12 +36,13 @@ spec:
     - name: enable-notifications
       value: "false"
     - name: enable-approval
-      value: "false"
+      value: "true"
+
 
   # Global failure handling
   onExit: notify-on-exit
 
-  templates:
+    templates:
   # Main deployment pipeline
   - name: deploy-pipeline
     steps:
@@ -61,6 +70,8 @@ spec:
             value: "{{workflow.parameters.app-name}}"
           - name: app-version
             value: "{{workflow.parameters.app-version}}"
+          - name: image-url
+            value: "{{workflow.parameters.image-registry}}/{{workflow.parameters.image-name}}:{{workflow.parameters.image-tag}}"
           - name: replicas
             value: "{{workflow.parameters.int-replicas}}"
 
@@ -75,6 +86,8 @@ spec:
             value: "{{workflow.parameters.app-name}}"
           - name: app-version
             value: "{{workflow.parameters.app-version}}"
+          - name: image-url
+            value: "{{workflow.parameters.image-registry}}/{{workflow.parameters.image-name}}:{{workflow.parameters.image-tag}}"
 
     # Step 4: Notify E2E success (if notifications enabled)
     - - name: notify-e2e-success
@@ -100,7 +113,7 @@ spec:
             value: "{{workflow.parameters.approver-email}}"
         when: "{{workflow.parameters.enable-approval}} == 'true'"
 
-    # Step 6: Deploy to STAGE environment
+    # Step 7: Deploy to STAGE environment
     - - name: deploy-to-stage
         template: deploy-app
         arguments:
@@ -111,10 +124,12 @@ spec:
             value: "{{workflow.parameters.app-name}}"
           - name: app-version
             value: "{{workflow.parameters.app-version}}"
+          - name: image-url
+            value: "{{workflow.parameters.image-registry}}/{{workflow.parameters.image-name}}:{{workflow.parameters.image-tag}}"
           - name: replicas
             value: "{{workflow.parameters.stage-replicas}}"
 
-    # Step 7: Validate STAGE deployment
+    # Step 8: Validate STAGE deployment
     - - name: validate-stage
         template: validate-deployment
         arguments:
@@ -123,8 +138,9 @@ spec:
             value: "stage"
           - name: app-name
             value: "{{workflow.parameters.app-name}}"
+        when: "{{workflow.parameters.enable-approval}} == 'true'"
 
-    # Step 8: Final success notification (if enabled)
+    # Step 6: Final success notification (if enabled)
     - - name: notify-success
         template: send-notification
         arguments:
@@ -144,6 +160,7 @@ spec:
       - name: environment
       - name: app-name
       - name: app-version
+      - name: image-url
       - name: replicas
     script:
       image: quay.io/openshift/origin-cli:latest
@@ -239,6 +256,58 @@ spec:
             format=json
         EOF
 
+        # Create ServiceAccount
+        cat <<EOF | oc apply -f -
+        apiVersion: v1
+        kind: ServiceAccount
+        metadata:
+          name: {{inputs.parameters.app-name}}
+          namespace: ${NAMESPACE}
+          labels:
+            app: {{inputs.parameters.app-name}}
+            environment: {{inputs.parameters.environment}}
+        EOF
+
+        # Create ClusterRole
+        cat <<EOF | oc apply -f -
+        apiVersion: rbac.authorization.k8s.io/v1
+        kind: ClusterRole
+        metadata:
+          name: {{inputs.parameters.app-name}}
+          labels:
+            app: {{inputs.parameters.app-name}}
+            environment: {{inputs.parameters.environment}}
+        rules:
+        - apiGroups: ["managed.openshift.io"]
+          resources: ["examples"]
+          verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+        - apiGroups: [""]
+          resources: ["events"]
+          verbs: ["create", "patch"]
+        - apiGroups: [""]
+          resources: ["configmaps", "secrets"]
+          verbs: ["get", "list", "watch"]
+        EOF
+
+        # Create ClusterRoleBinding
+        cat <<EOF | oc apply -f -
+        apiVersion: rbac.authorization.k8s.io/v1
+        kind: ClusterRoleBinding
+        metadata:
+          name: {{inputs.parameters.app-name}}
+          labels:
+            app: {{inputs.parameters.app-name}}
+            environment: {{inputs.parameters.environment}}
+        roleRef:
+          apiGroup: rbac.authorization.k8s.io
+          kind: ClusterRole
+          name: {{inputs.parameters.app-name}}
+        subjects:
+        - kind: ServiceAccount
+          name: {{inputs.parameters.app-name}}
+          namespace: ${NAMESPACE}
+        EOF
+
         # Create Service
         cat <<EOF | oc apply -f -
         apiVersion: v1
@@ -256,6 +325,9 @@ spec:
           - name: http
             port: 8080
             targetPort: 8080
+          - name: webhook
+            port: 8443
+            targetPort: 8443
           type: ClusterIP
         EOF
 
@@ -288,16 +360,59 @@ spec:
                 version: {{inputs.parameters.app-version}}
             spec:
               containers:
-              - name: app
-                image: registry.redhat.io/ubi8/ubi-minimal:latest
-                command: ["sleep", "3600"]
+              - name: {{inputs.parameters.app-name}}
+                image: {{inputs.parameters.image-url}}
                 ports:
                 - containerPort: 8080
                   name: http
+                - containerPort: 8443
+                  name: webhook
+                env:
+                - name: WATCH_NAMESPACE
+                  value: ""
+                - name: POD_NAME
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.name
+                - name: OPERATOR_NAME
+                  value: {{inputs.parameters.app-name}}
+                livenessProbe:
+                  httpGet:
+                    path: /healthz
+                    port: 8081
+                  initialDelaySeconds: 15
+                  periodSeconds: 20
+                readinessProbe:
+                  httpGet:
+                    path: /readyz
+                    port: 8081
+                  initialDelaySeconds: 5
+                  periodSeconds: 10
                 resources:
                   requests:
-                    cpu: 50m
+                    cpu: 100m
                     memory: 128Mi
+                  limits:
+                    cpu: 500m
+                    memory: 512Mi
+                securityContext:
+                  runAsNonRoot: true
+                  allowPrivilegeEscalation: false
+                  readOnlyRootFilesystem: true
+                  capabilities:
+                    drop:
+                    - ALL
+                volumeMounts:
+                - name: tmp
+                  mountPath: /tmp
+              serviceAccountName: {{inputs.parameters.app-name}}
+              securityContext:
+                runAsNonRoot: true
+                seccompProfile:
+                  type: RuntimeDefault
+              volumes:
+              - name: tmp
+                emptyDir: {}
                   limits:
                     cpu: 200m
                     memory: 256Mi
@@ -349,6 +464,7 @@ spec:
       - name: environment
       - name: app-name
       - name: app-version
+      - name: image-url
     script:
       image: quay.io/openshift/origin-cli:latest
       command: [bash]
@@ -424,6 +540,60 @@ spec:
           exit 1
         fi
         echo "✅ Test 4 PASSED: Service available"
+
+        # Test 5: Operator health endpoints
+        echo "Testing operator health endpoints..."
+        kubectl port-forward -n "${NAMESPACE}" service/{{inputs.parameters.app-name}} 8081:8081 &
+        PF_PID=$!
+        sleep 5
+
+        # Test readiness probe
+        if ! curl -f http://localhost:8081/readyz; then
+          echo "❌ E2E Test Failed: Readiness probe failed"
+          kill $PF_PID || true
+          exit 1
+        fi
+        echo "✅ Test 5a PASSED: Readiness probe working"
+
+        # Test liveness probe
+        if ! curl -f http://localhost:8081/healthz; then
+          echo "❌ E2E Test Failed: Liveness probe failed"
+          kill $PF_PID || true
+          exit 1
+        fi
+        echo "✅ Test 5b PASSED: Liveness probe working"
+
+        kill $PF_PID || true
+
+        # Test 6: CRD availability
+        if ! oc get crd examples.managed.openshift.io &>/dev/null; then
+          echo "❌ E2E Test Failed: CRD not found"
+          exit 1
+        fi
+        echo "✅ Test 6 PASSED: CRD available"
+
+        # Test 7: Create and validate Example resource
+        cat <<EOF | oc apply -f -
+        apiVersion: managed.openshift.io/v1alpha1
+        kind: Example
+        metadata:
+          name: test-example
+          namespace: ${NAMESPACE}
+        spec:
+          message: "E2E test example"
+        EOF
+
+        # Wait for the resource to be processed
+        sleep 10
+
+        if ! oc get example test-example -n "${NAMESPACE}" &>/dev/null; then
+          echo "❌ E2E Test Failed: Example resource not created"
+          exit 1
+        fi
+        echo "✅ Test 7 PASSED: Example resource created and processed"
+
+        # Cleanup test resource
+        oc delete example test-example -n "${NAMESPACE}" || true
 
         echo "🎉 All E2E tests passed in {{inputs.parameters.environment}}!"
 

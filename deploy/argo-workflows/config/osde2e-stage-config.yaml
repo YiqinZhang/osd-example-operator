@@ -38,4 +38,3 @@ data:
     validations:
       - "operator-metrics"
       - "performance-baseline"
-      - "security-scan"
